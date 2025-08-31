@@ -46,18 +46,56 @@
 
 \lstset{style=mystyle}
 
+\definecolor{string}{RGB}{214,94,53}
+\definecolor{key}{RGB}{70,130,180}
+\definecolor{number}{RGB}{152,118,170}
+\definecolor{boolean}{RGB}{204,102,102}
+
+\lstdefinelanguage{json}{
+    basicstyle=\ttfamily\footnotesize,
+    stringstyle=\color{string},
+    keywordstyle=\color{key},
+    morekeywords={true,false,null},
+    keywordstyle=[2]\color{boolean},
+    commentstyle=\color{codegreen},
+    morestring=[b]",
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    literate=
+        *{0}{{{\color{number}0}}}{1}
+         {1}{{{\color{number}1}}}{1}
+         {2}{{{\color{number}2}}}{1}
+         {3}{{{\color{number}3}}}{1}
+         {4}{{{\color{number}4}}}{1}
+         {5}{{{\color{number}5}}}{1}
+         {6}{{{\color{number}6}}}{1}
+         {7}{{{\color{number}7}}}{1}
+         {8}{{{\color{number}8}}}{1}
+         {9}{{{\color{number}9}}}{1}
+}
+
+\usepackage[
+backend=biber,
+style=numeric,
+sorting=none
+]{biblatex}
+\addbibresource{bibliography.bib}
 
 \begin{document}
 
-\section{CXL and HMSDK Setup using QEMU}
+\section*{CXL and HMSDK Setup using QEMU}
 
 Started with Ubuntu Plucky : Linux 6.14.08
+
+qemu-system-x86\_64 --version : 9.2.1
 
 Had \texttt{CONFIG\_CXL} support (after downloading \texttt{linux-modules-extra} and \texttt{sudo modprobing cxl\_mem})
 
 Most helpful doc : \href{https://www.fujitsu.com/jp/documents/products/software/os/linux/catalog/Exploring_CXL_Memory_Configuration_and_Emulation.pdf}{Fujitsu\_PDF} among others.
 
-Official QEMU CXL doc : \href{https://www.qemu.org/docs/master/system/devices/cxl.html}{Qemu\_website}
+Official QEMU CXL doc : \href{https://www.qemu.org/docs/master/system/devices/cxl.html}{Qemu website}
+
+Also need to install \texttt{ndctl} (building from source should not be needed).
 
 Key takeaways from doc :
 \begin{itemize}
@@ -219,7 +257,7 @@ qemu-system-x86_64 \
 
 Not sure why the firmware lines are needed and if they are really helpful. This allowed me to run \texttt{gups 1G --membind node 1} (finally!) but it was terribly slow. Also a more ambitious benchmark (like \texttt{gups 3G with 6G hogged})
 
-Tried today this script directly inspired from the FUjitsu PDF :
+Tried today this script directly inspired from the Fujitsu PDF :
 \begin{lstlisting}[language=bash]
 #!/bin/bash
 
@@ -282,7 +320,7 @@ A more ambitious benchmark (in current settings atleast), like hogging large por
 
 \textbf{Question : }\textit{Can we improve this, speed this up, make it usable?}: Will try to look into it, but no answer currently.
 
-\section{GUPS Benchmark with CXL nodes}
+\section*{GUPS Benchmark with CXL nodes}
 
 DDR RAM : 12 cores and 8G at node 0 \\
 CXL : no cores and 8G at node 1
@@ -294,7 +332,7 @@ Committed at \texttt{experiments/cxl-attached-gups}:
 No HMSDK, only NUMA\_balancing (combined with memory hogging for one case) :
 
 NUMA config common for all
-\begin{lstlisting}
+\begin{lstlisting}[language=json]
 "numa_balancing": {
     "numa_balancing": "2",
     "demotion_enabled": "true",
@@ -342,13 +380,13 @@ NUMA config common for all
 \end{tabular}
 \end{table}
 
-\section{Some words on HMSDK (Capacity Expansion)}
+\section*{Some words on HMSDK (Capacity Expansion)}
 
 \href{https://github.com/skhynix/hmsdk/wiki/Capacity-Expansion}{Reference}
 
 From what I could grasp, for capacity expansion / memory tiering, HMSDK uses existing DAMON and DAMOS frameworks and adds promotion/demotion actions (integrated in kernel 6.11 onwards, hence no local patch needed). From initial read, it seems to just helping in creating the initial \texttt{.yaml} config for \texttt{damo}, (in which we have to specify promotion and demotion targets, ie we need not depend on auto detection).
 
-DAMO Usage : \href{https://github.com/awslabs/damo/blob/next/USAGE.md}{doc}
+DAMO Usage : \href{https://github.com/damonitor/damo/blob/next/USAGE.md}{doc}
 
 Apart from that, I believe we have to interact with damo interface only and in order to tune it (if needed), its advanced options need to be studied.
 
@@ -363,6 +401,11 @@ sudo ~/hmsdk/damo/damo start ~/hmsdk.yaml
 \end{lstlisting}
 
 This starts damo with provided config, config will depend on device connected (different for CXL or memory numa node).
+
+From usage guidelines of hmsdk, it is by default enabled for a cgroup.Running a benchmark:
+\begin{lstlisting}[language=bash]
+sudo sh -c "echo \$$ > /sys/fs/cgroup/hmsdk/cgroup.procs && exec ./run.py"
+\end{lstlisting}
 
 To see a snapshot of active damo's stats:
 \begin{lstlisting}[language=bash]
@@ -392,7 +435,15 @@ Could use \texttt{damo} commands when working with cxl node as well :
     \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-29 221158.png"}
 \end{figure}
 
-\section{HMSDK benchmarks (with two NUMA nodes and NOT CXL)}
+\section*{HMSDK benchmarks (with two NUMA nodes and NOT CXL)}
+
+Since we need tiering detected for our NUMA nodes, we should specify some HMAT attributes and then kernel will do rest of the job (no local patch should be needed) : \href{https://lkml.org/lkml/2024/3/27/240}{Kernel Patch}
+
+Referring this excerpt from \href{https://www.qemu.org/docs/master/system/qemu-manpage.html}{QEMU manpage}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{image-3.png}
+\end{figure}
 
 Ran with this qemu config :
 \begin{lstlisting}[language=bash]
@@ -400,43 +451,69 @@ Ran with this qemu config :
 
 VAR_FAST_MEM_SIZE=8
 VAR_SLOW_MEM_SIZE=8
+VAR_TOTAL_MEM=$((${VAR_FAST_MEM_SIZE} + ${VAR_SLOW_MEM_SIZE}))
 VAR_CPU_CNT=12
 
 qemu-system-x86_64 \
     --enable-kvm \
     --nographic \
-    -m 16G \
+    -machine q35,hmat=on \
+    -m ${VAR_TOTAL_MEM}G \
     -cpu host,pmu=on \
-    -smp $VAR_CPU_CNT \
+    -smp ${VAR_CPU_CNT} \
     -drive file=$1,index=0,format=qcow2,if=virtio \
     -object memory-backend-ram,size=${VAR_FAST_MEM_SIZE}G,id=m0 \
     -object memory-backend-ram,size=${VAR_SLOW_MEM_SIZE}G,id=m1 \
     -numa node,nodeid=0,cpus=0-$((VAR_CPU_CNT-1)),memdev=m0 \
-    -numa node,nodeid=1,memdev=m1 \
-    -netdev user,id=net0 \
-    -device virtio-net-pci,netdev=net0
+    -numa node,nodeid=1,memdev=m1,initiator=0 \
+    -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-latency,latency=112 \
+    -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-bandwidth,bandwidth=271G \
+    -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-latency,latency=237 \
+    -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=46G \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    -monitor none \
+    -serial stdio
 \end{lstlisting}
+
+Resulting in this:
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{image-4.png}
+\end{figure}
+
+Latency and bandwidth values taken from [1].
+
+Afaik, access-latency, access-bw, specify both read/write. Though they can be specified explicitly if needed also. Also since already specified lat, bw hence not specifying dist between nodes.
 
 Committed at \texttt{experiments/hmsdk\_damon\_numa}:
 
-Ran GUPS for 9G without memory hogging for 4 cases :
+Ran GUPS for 9G for 4 cases :
 \begin{itemize}
     \item hmsdk/damo enabled but numa\_balancing disabled (demotion\_enabled=true though as per hmsdk usage guidelines)
-    \item numa\_balancing enabled but damon stopped
+    \item numa\_balancing enabled but damo stopped
     \item both hmsdk/damo and numa\_balancing enabled
     \item neither hmsdk/damo nor numa\_balancing enabled
+    \item both hmsdk/damo and numa\_balancing enabled with 2G hogged on node 0
 \end{itemize}
 
-\textbf{NOTE}: From usage guidelines of hmsdk, it is by default enabled for a cgroup and can also be enabled globally. I tried both, one default with group and adding gupstoy pid to cgroup/hmsdk.procs and other globally with -g flag. Now, main difference I came across in both is that \textit{pgmigrate\_success} and \textit{pgmigrate\_fail} came 0 for cgroup case and non-zero globally. Otherwise, pgpromote, demote and numa\_pages\_migrated were 0 for both. Not sure if this is expected. Please go through them if needed.
+\textbf{NOTE}: Not sure how to interpret results with hmsdk enabled, the values are strange. Like, with numa-balancing enabled, there are pgpromote\_candidate but no pgpromote, this is weird.
 
-To give an idea of latency wrt CXL, GUPS 7G in previous case took more than 20mins, where CXL occupied was around 200M. Here it took around 2 mins, even though 2.2G of node 1 were occupied.
+\textbf{NOTE2}: Not sure how to get number of migrate\_hot and migrate\_cold actions performed by DAMOS (looked it up but didn't find some concrete answer). Like, damo status shows cumulative values afaik. (One option can be to stop and start after each benchmark). Don't know if damo report is helpful in this regard or not.
+
+To give an idea of latency wrt CXL, GUPS 7G in previous case took more than 20mins, where CXL occupied was around 200M. Here GUPS 9G took around 2 mins, even though 2.2G of node 1 were occupied.
+
+\textbf{\textit{Bottomline}}:Perhaps, considering the behaviour of scripts, we may say CXL emulation scripts are good for understanding functional behaviour of hardware but for the purpose of benchmarking, tiered DRAM NUMA nodes look like the way to go.
 
 \hrulefill
 
-PS: You can boot the VM yourself. You can find it at my account at : /home/roopam/epfl-research-intern/qemu-vms/epfl-vm.img. The three scripts used are \texttt{cxl-vm.sh}, \texttt{new-hope.sh} and \texttt{boot.sh}. Inside the VM, please select Linux 6.12+ (it's also the default option in the grub menu).
+PS: You can boot the VM yourself. You can find it at my account at : /home/roopam/epfl-research-intern/qemu-vms/epfl-vm.img. The three scripts used are \texttt{cxl-vm.sh}, \texttt{new-hope.sh} and \texttt{numa-tiered.sh}. Inside the VM, please select Linux 6.12+ (it's also the default option in the grub menu).
 
 Login : ubuntu Password : roopam1234
 
 PS2 : Powering off VM writes some garbage on terminal sometimes. So better idea to sudo poweroff and start again instead of sudo reboot.
+
+\nocite{*}
+\printbibliography
 
 \end{document}

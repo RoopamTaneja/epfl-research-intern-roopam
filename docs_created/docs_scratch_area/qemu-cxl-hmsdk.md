@@ -2,11 +2,15 @@
 
 Started with Ubuntu Plucky : Linux 6.14.08
 
+qemu-system-x86_64 --version : 9.2.1
+
 Had CONFIG_CXL support (after downloading linux-modules-extra and sudo modprobing cxl_mem)
 
 Most helpful doc : [Fujitsu_PDF](https://www.fujitsu.com/jp/documents/products/software/os/linux/catalog/Exploring_CXL_Memory_Configuration_and_Emulation.pdf) among others.
 
 Official QEMU CXL doc : [Qemu website](https://www.qemu.org/docs/master/system/devices/cxl.html)
+
+Also need to install `ndctl`(building from source should not be needed).
 
 Key takeaways from doc :
 
@@ -270,6 +274,12 @@ sudo ~/hmsdk/damo/damo start ~/hmsdk.yaml
 
 This starts damo with provided config, config will depend on device connected (different for CXL or memory numa node).
 
+From usage guidelines of hmsdk, it is by default enabled for a cgroup.Running a benchmark:
+
+```bash
+sudo sh -c "echo \$$ > /sys/fs/cgroup/hmsdk/cgroup.procs && exec ./run.py" 
+```
+
 To see a snapshot of active damo's stats:
 
 ```bash
@@ -292,6 +302,12 @@ Could use `damo` commands when working with cxl node as well :
 
 **HMSDK benchmarks (with two NUMA nodes and NOT CXL)**
 
+Since we need tiering detected for our NUMA nodes, we should specify some HMAT attributes and then kernel will do rest of the job (no local patch should be needed) : [Kernel Patch](https://lkml.org/lkml/2024/3/27/240)
+
+Referring this excerpt from [QEMU manpage](https://www.qemu.org/docs/master/system/qemu-manpage.html)
+
+![](image-3.png)
+
 Ran with this qemu config : 
 
 ```bash
@@ -299,34 +315,57 @@ Ran with this qemu config :
 
 VAR_FAST_MEM_SIZE=8
 VAR_SLOW_MEM_SIZE=8
+VAR_TOTAL_MEM=$((${VAR_FAST_MEM_SIZE} + ${VAR_SLOW_MEM_SIZE}))
 VAR_CPU_CNT=12
 
 qemu-system-x86_64 \
     --enable-kvm \
     --nographic \
-    -m 16G \
+    -machine q35,hmat=on \
+    -m ${VAR_TOTAL_MEM}G \
     -cpu host,pmu=on \
-    -smp $VAR_CPU_CNT \
+    -smp ${VAR_CPU_CNT} \
     -drive file=$1,index=0,format=qcow2,if=virtio \
     -object memory-backend-ram,size=${VAR_FAST_MEM_SIZE}G,id=m0 \
     -object memory-backend-ram,size=${VAR_SLOW_MEM_SIZE}G,id=m1 \
     -numa node,nodeid=0,cpus=0-$((VAR_CPU_CNT-1)),memdev=m0 \
-    -numa node,nodeid=1,memdev=m1 \
-    -netdev user,id=net0 \
-    -device virtio-net-pci,netdev=net0
+    -numa node,nodeid=1,memdev=m1,initiator=0 \
+    -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-latency,latency=112 \
+    -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-bandwidth,bandwidth=271G \
+    -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-latency,latency=237 \
+    -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=46G \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    -monitor none \
+    -serial stdio
 ```
+
+Resulting in this:
+
+![](image-4.png)
+
+Latency and bandwidth values taken from [1].
+
+Afaik, access-latency, access-bw, specify both read/write. Though they can be specified explicitly if needed also. Also since already specified lat, bw hence not specifying dist between nodes.
 
 Committed at `experiments/hmsdk_damon_numa`:
 
-Ran GUPS for 9G without memory hogging for 4 cases :
+Ran GUPS for 9G for 4 cases :
 - hmsdk/damo enabled but numa_balancing disabled (demotion_enabled=true though as per hmsdk usage guidelines)
-- numa_balancing enabled but damon stopped
+- numa_balancing enabled but damo stopped
 - both hmsdk/damo and numa_balancing enabled
 - neither hmsdk/damo nor numa_balancing enabled
+- both hmsdk/damo and numa_balancing enabled with 2G hogged on node 0
 
-**NOTE**: From usage guidelines of hmsdk, it is by default enabled for a cgroup and can also be enabled globally. I tried both, one default with group and adding gupstoy pid to cgroup/hmsdk.procs and other globally with -g flag. Now, main difference I came across in both is that *pgmigrate_success* and *pgmigrate_fail* came 0 for cgroup case and non-zero globally. Otherwise, pgpromote, demote and numa_pages_migrated were 0 for both. Not sure if this is expected. Please go through them if needed.
+**NOTE**: Not sure how to interpret results with hmsdk enabled, the values are strange. Like, with numa-balancing enabled, there are pgpromote_candidate but no pgpromote, this is weird.
 
-To give an idea of latency wrt CXL, GUPS 7G in previous case took more than 20mins, where CXL occupied was around 200M. Here it took around 2 mins, even though 2.2G of node 1 were occupied.
+**NOTE2**: Not sure how to get number of migrate_hot and migrate_cold actions performed by DAMOS. Like, damo status shows cumulative values afaik. (One option can be to stop and start after each benchmark). Don't know if damo report is helpful in this regard or not.
+
+To give an idea of latency wrt CXL, GUPS 7G in previous case took more than 20mins, where CXL occupied was around 200M. Here GUPS 9G took around 2 mins, even though 2.2G of node 1 were occupied.
+
+---
+
+*Bottomline*:Perhaps, considering the behaviour of scripts, we may say CXL emulation scripts are good for understanding functional behaviour of hardware but for the purpose of benchmarking, tiered DRAM NUMA nodes look like the way to go.
 
 ---
 
@@ -335,3 +374,13 @@ PS: You can boot the VM yourself. You can find it at my account at : `/home/roop
 Login : ubuntu   Password : roopam1234
 
 PS2 : Powering off VM writes some garbage on terminal sometimes. So better idea to sudo poweroff and start again instead of sudo reboot.
+
+[1] : 
+
+@inproceedings{unal2025tolerate,
+  title={Tolerate It if You Cannot Reduce It: Handling Latency in Tiered Memory},
+  author={Unal, Musa and Gupta, Vishal and Pan, Yueyang and Ren, Yujie and Kashyap, Sanidhya},
+  booktitle={Proceedings of the 2025 Workshop on Hot Topics in Operating Systems},
+  pages={50--57},
+  year={2025}
+}
