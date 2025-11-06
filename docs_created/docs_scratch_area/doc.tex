@@ -1,0 +1,567 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[a4paper, margin=0.7in]{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+
+\graphicspath{{images/}}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=magenta,
+    filecolor=green,
+    urlcolor=blue,
+    pdftitle={Understanding Index Structures for Tiered Memory},
+}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\definecolor{string}{RGB}{214,94,53}
+\definecolor{key}{RGB}{70,130,180}
+\definecolor{number}{RGB}{152,118,170}
+\definecolor{boolean}{RGB}{204,102,102}
+
+\lstdefinelanguage{json}{
+    basicstyle=\ttfamily\footnotesize,
+    stringstyle=\color{string},
+    keywordstyle=\color{key},
+    morekeywords={true,false,null},
+    keywordstyle=[2]\color{boolean},
+    commentstyle=\color{codegreen},
+    morestring=[b]",
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    literate=
+        *{0}{{{\color{number}0}}}{1}
+         {1}{{{\color{number}1}}}{1}
+         {2}{{{\color{number}2}}}{1}
+         {3}{{{\color{number}3}}}{1}
+         {4}{{{\color{number}4}}}{1}
+         {5}{{{\color{number}5}}}{1}
+         {6}{{{\color{number}6}}}{1}
+         {7}{{{\color{number}7}}}{1}
+         {8}{{{\color{number}8}}}{1}
+         {9}{{{\color{number}9}}}{1}
+}
+
+\newcommand{\textcode}[1]{\texttt{\detokenize{#1}}}
+
+\title{Understanding Index Structures for Tiered Memory}
+\author{Roopam Taneja \\ RS3 Lab, EPFL}
+\date{}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\begin{abstract}
+This report details the process of benchmarking and understanding the behavior of index structures (using PiBench) on tiered memory. We evaluate two primary tiering schemes: the kernel's built-in TPP (Transparent Page Placement) coupled with AutoNUMA (\textcode{numa_balancing=2}), and the more recent DAMON (Data Access Monitor) framework. The objective is to understand how quickly a small, hot working set of a large index can be promoted to the faster memory tier and what impact this has on application throughput. We analyze results from MASIM, Memtis-B-Tree, and PiBench under various configurations, memory ratios, and access patterns. Please find results at \href{https://github.com/m8/cxl-index/tree/roopam-iitr}{CXL-Index GitHub}. Please do read \textcode{qemu-cxl-hmsdk.pdf} and \textcode{README.md} files in \textcode{experiments} and \textcode{experiments/final_results}.
+\end{abstract}
+
+\section{Introduction}
+
+The goal of this project is to benchmark and understand the behavior of index structures, particularly using PiBench, in a tiered memory environment. The experiments in this report were conducted on srv4 configured with local and remote DRAM, where the remote DRAM simulates a slower, high-latency memory tier. This setup serves as a doundation for upcoming experiments on hardware with true local/remote CXL memory (on srv9).
+
+We compare following memory tiering schemes:
+\begin{enumerate}
+    \item \textbf{TPP (Transparent Page Placement) + AutoNUMA:} This scheme uses the kernel's built-in NUMA balancing features. It is configured with \textcode{numa_balancing = 2} (allowing hot page promotion) and \textcode{demotion_enabled=true} (enabling TPP's LRU-based demotion).
+    \item \textbf{DAMON (Data Access Monitor):} This scheme utilizes the \textcode{damo} userspace tool to implement memory tiering policies, specifically using \textcode{migrate-hot} and \textcode{migrate-cold} actions.
+    \item \textbf{Baseline (No Tiering):} For comparison, we also run benchmarks without any tiering scheme, using \textcode{numa_balancing = 0}.
+\end{enumerate}
+
+The primary aim is to observe how effectively a small, hot working set within a large index (spanning both memory nodes) is identified and promoted to the faster tier (Node 0). We hypothesize that an effective tiering scheme will quickly promote the hot set, after which the number of promotions should stabilize, leading to improved application throughput.
+
+\section{System Setup and Configuration}
+
+\subsection{Kernel Configuration for Tiered Memory}
+A critical prerequisite for AutoNUMA (\textcode{numa_balancing=2}) to function correctly is the system's recognition of multiple memory tiers, visible in \textcode{/sys/devices/virtual/memory_tiering/memory_tier*}.
+
+When both nodes are of the same memory type (e.g., DRAM), the kernel may not differentiate them. Initial attempts to patch the kernel source based on an \href{https://github.com/skhynix/hmsdk/issues/2}{HMSDK GitHub issue} failed to trigger successful page promotions (\textcode{pgpromote_success}). I still don't know the exact reason. Even increased CXL\_MEM\_DIST to \textcode{10 $\times$ DRAM\_DIST} from \textcode{5 $\times$ DRAM\_DIST} in the issue, but that didn't help.
+
+A working solution was found using the \textcode{tierinit-patch} from the colloid-tb repository \href{https://github.com/RoopamTaneja/tierinit-patch-colloid-tb-my-version}{tierinit-patch}. After patching the kernel source and loading as a kernel module, it successfully creates two visible memory tiers and enables AutoNUMA promotions and demotions. So this works and is also flexible (the module can be loaded/unloaded at will).
+
+Alongside this patch, DAMON support was enabled in the kernel configuration. This is how \textcode{.config} looked for compiling the kernel with DAMON support:
+\begin{lstlisting}[language=bash, caption={Kernel .config for DAMON}]
+$ grep -i damon .config
+
+CONFIG_DAMON=y
+CONFIG_DAMON_VADDR=y
+CONFIG_DAMON_PADDR=y
+CONFIG_DAMON_SYSFS=y
+CONFIG_DAMON_RECLAIM=y
+CONFIG_DAMON_LRU_SORT=y
+CONFIG_DAMON_STAT=y
+CONFIG_DAMON_STAT_ENABLED_DEFAULT=y
+# DAMON Samples
+# CONFIG_SAMPLE_DAMON_WSSE is not set
+# CONFIG_SAMPLE_DAMON_PRCL is not set
+# CONFIG_SAMPLE_DAMON_MTIER is not set
+# end of DAMON Samples
+\end{lstlisting}
+
+Finally, two other system settings were configured::
+\begin{itemize}
+    \item \textcode{lru_gen_enabled = 0x0007}
+    \item \textcode{zone_reclaim_mode = 0}
+\end{itemize}
+
+The experiments were conducted on the \textcode{srv4} machine running kernel version \textcode{6.17.1}.
+
+\subsection{Tiering Scheme Details}
+
+\subsubsection{AutoNUMA + TPP}
+This scheme was enabled by setting \textcode{numa_balancing = 2} and \textcode{demotion_enabled=true}. The primary metrics monitored for this scheme were:
+\begin{itemize}
+    \item \textbf{Promotions:} \textcode{pgpromote_success}
+    \item \textbf{Demotions:} \textcode{pgdemote_kswapd}
+\end{itemize}
+
+\subsubsection{DAMON}
+Initially, the HMSDK framework was considered, as it was developed to support CXL devices and provided memory tiering based on DAMON. HMSDK originally extended DAMOS with \textcode{migrate_hot} and \textcode{migrate_cold} actions. However, these actions have since been upstreamed into the mainline kernel. The latest versions of DAMON now offer more advanced features than the original HMSDK, including applying actions per-NUMA-node via the command line and auto-tuning of monitoring intervals and quotas. Therefore, the latest DAMON version was used directly.
+
+
+NOTE : We have \textcode{demotions_enabled=false} with DAMON, since we are focussing on DAMON demotions only.
+
+The DAMON-based tiering was implemented using a userspace script, \textcode{damon-mem-tier.sh}. It's taken from here: \href{https://lore.kernel.org/all/20250420194030.75838-1-sj@kernel.org/}{sjp-damon-patch}.
+
+The core \textcode{damo} command is as follows:
+\begin{lstlisting}[language=bash, caption={damon-mem-tier.sh command}]
+"$damo_bin" start \
+        --numa_node 0 --monitoring_intervals_goal 4% 3 5ms 10s \
+                --damos_action migrate_cold 1 --damos_access_rate 0% 0% \
+                --damos_apply_interval 1s \
+                --damos_quota_interval 1s --damos_quota_space 200MB \
+                --damos_quota_goal node_mem_free_bp 0.5% 0 \
+                --damos_filter reject young \
+        --numa_node 1 --monitoring_intervals_goal 4% 3 5ms 10s \
+                --damos_action migrate_hot 0 --damos_access_rate 5% max \
+                --damos_apply_interval 1s \
+                --damos_quota_interval 1s --damos_quota_space 200MB \
+                --damos_quota_goal node_mem_used_bp 99.7% 0 \
+                --damos_filter allow young \
+                --damos_nr_quota_goals 1 1 --damos_nr_filters 1 1 \
+        --nr_targets 1 1 --nr_schemes 1 1 --nr_ctxs 1 1
+\end{lstlisting}
+
+A brief explanation of the key parameters:
+\begin{description}
+    \item[\textcode{--monitoring_intervals_goal 4\% 3 5ms 10s}] This tweaks monitoring intervals to capture 4\% of accesses in 3 aggregate intervals, with a \textcode{sample\_interval} allowed to vary between 5ms and 10s. This can likely be left as the default.
+
+    \item[\textcode{--damos_action migrate_cold 1 --damos_access_rate 0\% 0\%}] This applies \textcode{migrate\_cold} (demotion), sending all pages with an access rate of 0\% (not touched in the last aggregate interval) to Node 1. This also likely does not need modification.
+
+    \item[\textcode{--damos_action migrate_hot 0 --damos_access_rate 5\% max}] This applies \textcode{migrate\_hot} (promotion), sending all pages with an access rate of 5\% or more to Node 0. 5\% is a good default.
+
+    \item[\textcode{--damos_apply_interval 1s}] Actions are applied every 1 second, which seems reasonable, can be tweaked for more aggressive tuning.
+
+    \item[\textcode{--damos_quota...}] These are the key values that \textbf{can be modified}. The \textcode{damos_quota_goal} settings aim for a target memory usage on Node 0 (e.g., 99.7\% used). However, the static \textcode{damos_quota_space 200MB} puts an upper cap (200 MB/s in this case) on the migration overhead. This is the main value that can be tweaked; the others look good as defaults.
+\end{description}
+
+Metrics for DAMON were obtained by querying sysfs. After setting \textcode{kdamonds/N/refresh_ms} to 100ms, the number of pages migrated was calculated from 
+
+\textcode{/kdamonds/N/contexts/0/schemes/0/stats/sz_applied} divided by the page size. (\href{https://lore.kernel.org/damon/20250717055448.56976-1-sj@kernel.org/}{refresh-damon-patch})
+
+Thus, these numbers get us:
+\begin{itemize}
+    \item \textbf{Promotions:} \textcode{migrate_hot_pages}
+    \item \textbf{Demotions:} \textcode{migrate_cold_pages}
+\end{itemize}
+
+Further discussion on DAMON metrics can be found in \href{https://github.com/damonitor/damo/issues/34}{damo-issue-34} and \href{https://github.com/skhynix/hmsdk/issues/6}{hmsdk-issue-6}.
+
+\subsection{DAMON/DAMOS Internals}
+DAMON and DAMOS work in concert. For our use case, we wish to monitor using DAMON and apply actions using DAMOS.
+\begin{itemize}
+    \item \textbf{DAMON (Monitor):} Deals with region adjustments and auto-tuning of monitoring intervals.
+    \item \textbf{DAMOS (Operations):} Deals with applying actions (like migration) based on quotas, priorities, filters, and watermarks.
+\end{itemize}
+
+Recent DAMON features include auto-tuning for monitoring intervals (Figure \ref{fig:damon_interval_tuning}) and quotas (Figure \ref{fig:damon_quota_tuning}), as detailed in \href{https://github.com/damonitor/talks/blob/master/2025/kernel_recipes/damon_kernel_recipes2025.pdf}{damon-kernel-recipes-2025} and \href{https://origin.kernel.org/doc/html/latest/mm/damon/design.html}{damon-kernel-design}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{image-5.png}
+    \includegraphics[width=0.8\textwidth]{image-6.png}
+    \caption{DAMON Monitoring Interval Auto-tuning \protect\href{https://github.com/damonitor/talks/blob/master/2025/kernel_recipes/damon_kernel_recipes2025.pdf}{damon-kernel-recipes-2025}}
+    \label{fig:damon_interval_tuning}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{image-7.png}
+    \caption{DAMON Quota Auto-tuning \protect\href{https://origin.kernel.org/doc/html/latest/mm/damon/design.html}{damon-kernel-design}}
+    \label{fig:damon_quota_tuning}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image-8.png}
+    \caption{DAMON stats \protect\href{https://origin.kernel.org/doc/html/latest/admin-guide/mm/damon/usage.html}{sysfs interface}}
+    \label{fig:damon_goals}
+\end{figure}
+
+
+\section{Experimental Methodology}
+
+\subsection{Workload Configuration}
+All benchmarks were run with a 1 billion key configuration. The workloads included a mix of read-heavy and write-heavy operations, using both \textcode{UNIFORM} (no skew) and \textcode{SELFSIMILAR} (variable skew) data distributions. The desired memory ratio between the fast and slow tiers was achieved using a userspace memeater application.
+
+\subsection{Benchmarks}
+A suite of benchmarks was used to evaluate the tiering schemes:
+\begin{itemize}
+    \item \textbf{PiBench (CXL-Index):} The primary benchmark for evaluating index structures.
+    \item \textbf{MASIM:} A synthetic workload generator.
+    \item \textbf{Memtis-Btree:} A B-Tree implementation.
+    \item \textbf{GUPS:} Used for initial validation and hotset experiments.
+\end{itemize}
+
+All benchmarks are run with \textcode{--cpunodebind=0} to ensure CPU affinity to Node 0 cores.
+
+\subsection{Code Modifications}
+Several modifications were made to the benchmarking framework:
+\begin{enumerate}
+    \item Added monitoring support for \textcode{vmstat} and DAMON stats to \textcode{run.py}.
+    \item Added benchmark-specific arguments to run different benchmarks from \textcode{run.py}.
+    \item Added support for easily using existing options (\textcode{memhog}, \textcode{mon-perf} etc.) in \textcode{run.py}.
+    \item \textcode{run.py} was updated to automatically calculate and hog required memory on Node 0 using userspace memeater based on the desired memory ratio and benchmark RSS.
+    \item Added basic PiBench stdout parsing in \textcode{launch_helpers.py}.
+    \item Modified \textcode{index-benchmarks/latches/OMCSOffset.h} to use \textcode{malloc()} instead of \textcode{numa_alloc()}:
+        
+    \begin{lstlisting}[language=c, caption={Modification in OMCSOffset.h}]
+//base_qnode = (QNode *)numa_alloc_interleaved(npages * PAGE_SIZE);
+base_qnode = (QNode *)malloc(npages * PAGE_SIZE);
+//base_qnode = (QNode *)numa_alloc_onnode(sizeof(QNode) * Lock::kNumQueueNodes, node);
+base_qnode = (QNode *)malloc(sizeof(QNode) * Lock::kNumQueueNodes);
+    \end{lstlisting}
+    \item For the Memtis-Btree benchmark, the code was modified to restrict the find operation to the first 25\% of keys, creating a smaller, defined hotset (\textcode{NELEMENTS / 4}).
+    \item The \textcode{launch.py} script was modified to \textcode{LD_PRELOAD} \textcode{libjemalloc.so} for \textcode{cxl-index} 
+
+    and set \textcode{OMP_NUM_THREADS} for \textcode{btree}.
+    \item An option was added to \textcode{run.py} to pass an interleave ratio with \textcode{--numa_interleave} to make use of numactl's \textcode{--weighted-interleave} mode. However, since this is restricted to allocation and wouldn't help our purpose, it was not explored further.
+    \item As a side-quest, the PCM version in the PiBench repository was updated to make it work for newer architectures. The \textcode{pibench} submodule in \textcode{index-benchmarks/} points to this \href{https://github.com/RoopamTaneja/pibench-fork}{updated fork}.
+\end{enumerate}
+
+\subsection{Initial Challenges}
+Initial experiments with PiBench were unreliable. Problems included:
+\begin{enumerate}
+    \item Failure to see two distinct memory tiers, which prevented AutoNUMA promotions (fixed by the \textcode{tierinit-patch}).
+    \item A cap on processor frequency, which skewed performance results (\textcode{MEMBIND1} having better or same throughput as \textcode{MEMBIND0}).
+\end{enumerate}
+Due to these issues, most early experimental results are not useful though stored in \textcode{experiments/old_experimental_results}.
+
+There were also issues with realising the multi-threaded nature of Memtis-BTree benchmark, which were fixed by setting \textcode{OMP_NUM_THREADS}, however since the BTree code itself was revamped, it is not an issue now.
+
+For MASIM as well, it took some time to arrive at a correct configuration script suitable for our experiments.
+
+\subsection{PiBench WSS Analysis}
+A WSS (Working Set Size) analysis was performed for PiBench (30G RSS, 1s sample time) using the \textcode{wss.pl} script from \href{https://github.com/brendangregg/wss}{wss-script} to understand the memory footprint of different access patterns using default method of \textcode{sudo ./wss.pl <pid> <time>}.
+
+\begin{table}[H]
+\centering
+\caption{PiBench WSS (1s) for 30G RSS}
+\label{tab:wss_pibench}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Distribution (Skew)} & \textbf{WSS (1s)} \\ \midrule
+UNIFORM                      & 28.3 G            \\
+SELFSIMILAR (0.5)            & 28.2 G            \\
+SELFSIMILAR (0.2)            & 26.4 G            \\
+SELFSIMILAR (0.1)            & 24.6 G            \\
+SELFSIMILAR (0.01)           & 15.7--16 G        \\
+SELFSIMILAR (0.005)          & 11.7 G            \\
+SELFSIMILAR (0.004)          & 10.4 G            \\
+SELFSIMILAR (0.002)          & 7.5 G             \\
+SELFSIMILAR (0.0015)         & 6.3 G             \\
+SELFSIMILAR (0.001)          & 4.9 G             \\
+ZIPFIAN (0.5)                & 27.7 G            \\
+ZIPFIAN (0.9)                & 26 G              \\
+ZIPFIAN (0.99)               & 23.7 G            \\
+ZIPFIAN (0.999)              & 23.6 G            \\
+ZIPFIAN (0.9999)             & 23.4 G            \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results and Analysis}
+
+\subsection{MASIM Benchmark}
+MASIM is single-threaded. More info at \href{https://github.com/sjp38/masim}{MASIM GitHub Repo}.
+
+\textbf{Goal}: Validate autonuma promotions performing better than baseline for a known hotset on remote memory.
+
+A config was designed to create two regions, \textcode{r0} (40G) and \textcode{r1} (10G), with \textcode{r1} acting as the hotset. Settled on this config script after several trials and errors. 
+\begin{lstlisting}[caption={MASIM Configuration Script}]
+r0, 40000000000, none
+r1, 10000000000, none
+
+p0
+20000
+r0, 0, 4096, 1, wo
+
+p1
+50000
+r1, 0, 4096, 1, wo
+
+p2
+100000
+r1, 0, 4096, 1, ro
+\end{lstlisting}
+
+RSS is 47.6G (since it is 5e9 bytes). With a 1:1 memory ratio ensured by userspace memeater (24G on Node 0), we want \textcode{r0} to fill Node 0 and spill to Node 1, guaranteeing the hotset \textcode{r1} is initially allocated on Node 1. 
+
+If two regions are accessed in same phase, their accesses are interleaved. Thus to achieve our desired allocation, it is important for their allocation phases (p0, p1) to be different.  They must have writes to actually increase RSS.
+
+Our measurement phase \textcode{p2} then sequentially accesses this hotset \textcode{r1}. Sequential access allows a predictable WSS (checked using wss tool, its close to 9.4G for 1s).
+
+Throughput values time-series at 1-second intervals were collected using \textcode{--log_interval=1000} flag in MASIM command. The values were averaged over 5 runs for each config.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{1-1.png}
+    \caption{MASIM 1:1 Ratio Time Series (Avg. 5 runs)}
+    \label{fig:masim_1-1}
+\end{figure}
+
+As shown in Figure \ref{fig:masim_1-1}, for the 1:1 case, AutoNUMA shows a clear improvement in throughput over the baseline. DAMON's performance is similar to the baseline. The number of migrated pages was also significantly higher for AutoNUMA than for DAMON in this workload.
+
+The results for the above config along with plots are saved in \textcode{final_results/masim_correct_run}. Further details in \textcode{masim_correct_run/README.md}.
+
+\subsection{Memtis-BTree Benchmark}
+The B-Tree benchmark using updated code which tracks throughput was executed on srv4. 
+
+\begin{itemize}
+    \item No. of Elements: 400M
+    \item No. of Lookups: 5000000000M
+    \item Secs to run: 120
+\end{itemize}
+
+The RSS was 39.8GB. To create a smaller WSS, the find operation was restricted to the first 25\% of keys, resulting in a WSS of 17-18G. Hence results for \textcode{MEMBIND0}, \textcode{MEMBIND1}, \textcode{1:1} and \textcode{2:1} for 8, 16 and 28 threads. Further details in \textcode{final_results/README.md}
+
+Figure \ref{fig:btree_compare} shows the throughput and migration comparison for all configurations. Figures \ref{fig:btree_t8} through \ref{fig:btree_t28} show the time-series throughput logs for 8, 16, and 28 threads, respectively. All values have been \textbf{averaged over 5 runs}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{memory_tiering_comparison_all_configs.png}
+    \caption{B-Tree Throughput Comparison (Avg. 5 runs)}
+    \label{fig:btree_compare}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{config_t8_timeseries.png}
+    \caption{B-Tree Time Series, 8 Threads (Avg. 5 runs)}
+    \label{fig:btree_t8}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{config_t16_timeseries.png}
+    \caption{B-Tree Time Series, 16 Threads (Avg. 5 runs)}
+    \label{fig:btree_t16}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{config_t28_timeseries.png}
+    \caption{B-Tree Time Series, 28 Threads (Avg. 5 runs)}
+    \label{fig:btree_t28}
+\end{figure}
+
+\subsection{PiBench (Index Benchmark)}
+For more info on all PiBench experiments conducted on srv4, do check \textcode{final_results/README.md}.
+
+Common parameters:
+
+\begin{itemize}
+    \item \textbf{Keys:} 1e9
+    \item \textbf{Duration:} 120s
+    \item \textbf{Replicates:} 3 (All values averaged over 3 runs)
+    \item \textbf{RSS:} 30G
+\end{itemize}
+
+\subsubsection{Initial Run (Skew 0.2)}
+The first proper run of the PiBench benchmark (\textcode{index_first_proper_run}) used a \textcode{SELFSIMILAR} distribution with a skew of 0.2 compared with \textcode{UNIFORM} distribution for 16 and 28 threads. All files in \textcode{final_results/index_first_proper_run}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{first_run.png}
+    \caption{PiBench (Skew 0.2)}
+    \label{fig:pibench_skew0.2}
+\end{figure}
+
+Key observations from this run (Figure \ref{fig:pibench_skew0.2}):
+\begin{itemize}
+    \item \textbf{Throughput:} Throughput slightly degraded for AutoNUMA compared to baseline, while it remained same or slightly improved for DAMON. This is possibly due to the synchronous nature of AutoNUMA migrations versus the asynchronous nature of DAMON \href{https://lore.kernel.org/all/20250420194030.75838-1-sj@kernel.org/}{sjp-damon-patch}.
+    \item \textbf{Migrations:} AutoNUMA migrated significantly more pages than DAMON (perhaps can be changed by tuning parameters). DAMON performed almost no demotions. \textbf{This is seen in all runs.}
+    \item \textbf{Memory Ratio:} The expected throughput trend (\textcode{MEMBIND0 > 2:1 > 1:1 > 1:2 > 1:4 > MEMBIND1}) was generally respected except a couple of cases.
+    \item \textbf{Threads:} If other things kept same, 28 threads gives an increase of 1.7-1.8x (expected since 28 threads are 1.75 times of 16, so almost linear increase).
+    \item \textbf{Skew:} Compared to \textcode{UNIFORM} distribution, the skewed access pattern (skew 0.2) resulted in slightly better throughput for all schemes (perhaps due to lower cache misses, not sure).
+    \item Throughput across tiering schemes is almost same for \textcode{MEMBIND0} and \textcode{MEMBIND1} cases, with slight improvements for DAMON (DAMON does not respect memory binding and still migrates hot pages to Node 0).
+\end{itemize}
+
+\subsubsection{Small WSS Runs (Skew 0.01 \& 0.001)}
+Realizing a smaller WSS that fits entirely on Node 0 would be a better test, runs were performed with \textcode{SELFSIMILAR} skews of 0.01 (WSS $\approx$ 16G) and 0.001 (WSS $\approx$ 4.9G), using only those memory ratios that would ensure the hotset can fit on Node 0. All files in \textcode{final_results/index_skew_1e-2_run} and \textcode{final_results/index_skew_1e-3_run}.
+
+Comparing throughputs for different schemes for \textcode{SELFSIMILAR} with skews 0.2, 0.01 and 0.001 :
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{2e-1.png}
+        \caption{PiBench Throughput (Skew 0.2)}
+        \label{fig:pibench_2e-1}
+    \end{subfigure}\hfill
+    \begin{subfigure}{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{1e-2.png}
+        \caption{PiBench Throughput (Skew 0.01)}
+        \label{fig:pibench_1e-2}
+    \end{subfigure}\hfill
+    \begin{subfigure}{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{1e-3.png}
+        \caption{PiBench Throughput (Skew 0.001)}
+        \label{fig:pibench_1e-3}
+    \end{subfigure}
+\end{figure}
+
+Observations from smaller WSS runs:
+\begin{itemize}
+    \item Throughput increased manifold with more skewed access (smaller WSS). Skew 0.2 vs Skew 0.01 : throughput becomes 7-8x. Skew 0.2 vs 0.001 : throughput becomes 12-13x.
+    \item For skew 0.01 (Figure \ref{fig:pibench_1e-2}), baseline performed the best while DAMON lost its slight advantage.
+    \item For skew 0.001 (Figure \ref{fig:pibench_1e-3}), there were no clear trends, and the performance gap between schemes was very low.
+\end{itemize}
+
+Full graphs for these runs are shown in Figures \ref{fig:pibench_1e-2_full} and \ref{fig:pibench_1e-3_full}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{1e-2-full.png}
+    \caption{PiBench Full Run (Skew 0.01)}
+    \label{fig:pibench_1e-2_full}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{1e-3_full.png}
+    \caption{PiBench Full Run (Skew 0.001)}
+    \label{fig:pibench_1e-3_full}
+\end{figure}
+
+\subsubsection{Partial Long Run Analysis (AutoNUMA)}
+A full run (all combinations of threads, read/write ratios, skews, and memory ratios) was started but interrupted after 2 days (since complete run would have taken ~18 days). This completed all AutoNUMA configs for 16 and 28 threads.
+
+All configuration parameters:
+\begin{itemize}
+    \item \textbf{Threads:} [28, 16, 8, 4, 2, 1]
+    \item \textbf{Read Ratios:} 0.0, 0.2, 0.5, 0.8, 1.0
+    \item \textbf{Skews:} \textcode{SELFSIMILAR - [0.01, 0.1, 0.2, 0.5]}, \textcode{UNIFORM}
+    \item \textbf{Memory Ratios:} 1:4, 1:2, 1:1, 2:1, \textcode{MEMBIND0}, \textcode{MEMBIND1}
+\end{itemize}
+
+All files in final\_results/cxl\_index\_final\_long\_run\_partial-autonuma\_t16\_28. Check out \textcode{individual_graphs}, \textcode{vary_read_ratio}, \textcode{vary_threads} and \textcode{vary_skew} folders for plots.
+
+Observations from varying only one parameter at a time:
+
+\begin{itemize}
+    \item \textbf{Varying Read Ratio:} General trend is of course, \textcode{MEMBIND0 >> shared > MEMBIND1}. For large WSS, throughput was similar across memory ratios and only discernible trend is \textcode{MEMBIND0 >> rest}. Also, there is not much difference across read ratios for a particular memory ratio.
+    \item As WSS decreased (e.g., skew 0.2), the gap across read ratios increased, with read-heavy workloads (1.0) showing higher throughput and respecting the memory ratio trends (\textcode{2:1 > 1:1 > 1:2...}) more faithfully, while others may have some exceptions (including \textcode{MEMBIND0 > MEMBIND1} not being respected sometimes, probably due to very small WSS).
+    \item Also, the gap between \textcode{MEMBIND0} and rest decreases with smaller WSS. I hope that's desirable.
+    \item \textbf{Varying Threads:} Throughput for 28 threads was consistently much higher than 16 threads (though gap may vary). However, the number of migrations (hot and cold) was much higher for 16 threads than 28. Exceptions may arise in order of no of migrations for small WSS (\textcode{skew=0.01}) and non-read-heavy workloads (\textcode{read ratio<1.0}).
+    \item \textbf{Varying Skew:} The throughput improvement from smaller WSS (more skew) was most visible for high read ratios. For write-heavy workloads, the gap was smaller, and trends were less consistent. Like check 28 threads, \textcode{read_ratio=0.2} and \textcode{read_ratio=0.0} cases : \textcode{skew=0.1,0.01} have lower throughput than larger skews.
+    \item As mentioned, difference in throughput across mem ratios also becomes less visible for smaller read ratios (specially smaller skews, probably small WSS stops changing the throughput).
+\end{itemize}
+
+\section{Related and Future Work}
+
+\subsection{Related Work: SINLK Paper}
+The \href{https://doi.org/10.48550/arXiv.2507.18559}{SINLK paper} presents a method for tiered memory management with a focus on node granularity and promoting entire paths.
+\begin{itemize}
+    \item \textbf{Method:} 
+    
+    \begin{itemize}
+    \item It uses heuristics, such as giving preference to upper B-Tree nodes for fast memory.
+    
+    \item Suggests using leaf nodes to track path access frequency. (Seems obvious upon reading but isn't at first read.)
+    
+    \item Also single point of transition from fast to slow memory along a path is logical as well, and the methods used to achieve that are straightforward but make sense.
+
+    \item It employs asynchronous promotions/demotions and dynamic watermark adjustment. 
+    
+    \item Since acting at node granularity, it requires node metadata bookkeeping (part of frontend module). It requires application modification to include node metadata.
+
+    \item Apart from that, uses common techniques :
+
+        \begin{itemize}
+        \item background asynchronous promotions/demotions
+        \item dynamic watermark adjustment
+        \item migration trigerred on breach of watermark and at some interval
+        \item halves access frequency periodically to give preference to recent accesses
+        \end{itemize}
+
+    \end{itemize}
+
+    \item \textbf{Evaluation:}
+
+    \begin{itemize}
+        \item Microbenchmark: Focusses on skewed accesses (90\% requests to 5\% keys)
+        \item Macrobenchmark : YCSB (with Zipfian) 
+        \item Also mixes reads and updates.
+        \item Baseline : Weighted interleave NUMA allocation
+        \item Uses TPP, MEMTIS, Caption for comparisons (along with some other optimized index variants).
+        \item For microbenchmark, creates an ideal case to compare with all hot paths in fast memory initially (I think they can do this because it's a synthetic workload for microbenchmark so they can control the hot paths created and their allocation with their module).
+        \item Across cases, they show it to be having a better throughput, lower average and tail latencies, nice scalability with threads. Esp. good on read-heavy workloads (perhaps due to keeping a lock on writes while migrating).
+        \item Lastly, picks two traces with largest WSS from Alibaba Block Traces for real-world evaluation.
+
+    \end{itemize}
+
+    \item \textbf{Interesting Ideas:} The paper includes a sensitivity analysis with a dynamic workload (shifting the hot region) and an analysis of the contribution of each individual factor both of which are interesting directions for future work.
+\end{itemize}
+
+\subsection{Future Scope}
+Based on this project, future work could explore:
+\begin{itemize}
+    \item Replicate the B+Tree (OptiQL) and MASIM benchmarks on the CXL-enabled server (srv9) using its local (Node 2) and remote CXL (Node 3) memory, comparing Baseline and AutoNUMA performance. This will validate the simulated remote-DRAM results against true CXL hardware.
+    \item Trying different combinations of tiering schemes, as suggested in \href{https://github.com/damonitor/damo/issues/34#issuecomment-3341920062}{damo-issue-comment} by SeongJae Park.
+    \item Further tuning of DAMON command parameters (e.g., \textcode{damos_quota_space}) and AutoNUMA aggressiveness (e.g., \textcode{scan_size}, \textcode{scan_interval}).
+    \item Implementing a dynamic workload benchmark, similar to the SINLK paper, to test the agility of each tiering scheme.
+    \item numactl has introduced \textcode{--weighted-interleave}  mode, however that is just restricted to allocation. DAMON is also bringing updates to have dynamic weights for weighted interleave, using migration actions to match the weights : \href{https://lore.kernel.org/all/20250709005952.17776-1-bijan311@gmail.com/}{damon-patch}. They can be explored in future.
+\end{itemize}
+
+\section{Conclusion}
+This project successfully set up a tiered memory testbed and evaluated the performance of AutoNUMA+TPP and DAMON for index-structure workloads. We found that the performance is highly dependent on the workload (WSS, read/write ratio) and the tiering scheme's design. DAMON generally provided more stable and sometimes improved throughput, likely due to its asynchronous, quota-managed migrations. AutoNUMA, while aggressive in promoting pages, sometimes suffered from performance degradation, possibly due to its synchronous nature. For highly skewed workloads with small, stable hotsets, the difference between schemes diminished.
+
+Our findings indicate that DAMON, due to its asynchronous nature, often provides stable or improved throughput, whereas AutoNUMA's synchronous promotions can sometimes degrade performance.
+
+\end{document}

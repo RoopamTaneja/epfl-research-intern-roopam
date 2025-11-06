@@ -225,7 +225,8 @@ Sometimes would get other strange kernel errors, again having to kill the vm fin
 
 What does this imply? : Since we are using TCG, things are pretty slow. And, \textbf{no pmu as well} (I think).
 
-About the \texttt{qemu-system-x86\_64: virtio: bogus descriptor or out of resources} issue, LLM suggested me perhaps it is an I/O issue, and looked like that since \texttt{./memeater --membind 1} had worked (although slowly), so suggested me this script :
+About the \texttt{qemu-system-x86\_64: virtio: bogus descriptor or out of resources} issue, LLM suggested me perhaps it is an I/O issue, and looked like that since \texttt{./memeater --membind 1} had worked (although slowly), so suggested me this script (saved in `experiments/qemu-scripts/cxl-vm-1.sh`) :
+
 \begin{lstlisting}[language=bash]
 #!/bin/bash
 
@@ -445,14 +446,15 @@ Referring this excerpt from \href{https://www.qemu.org/docs/master/system/qemu-m
     \includegraphics[width=0.8\textwidth]{image-3.png}
 \end{figure}
 
-Ran with this qemu config :
+So this script turned out to be helpful, and all subsequent experiments were done with this (saved in `experiments/qemu-scripts/numa-tiering.sh`):
+
 \begin{lstlisting}[language=bash]
 #!/bin/bash
 
-VAR_FAST_MEM_SIZE=8
-VAR_SLOW_MEM_SIZE=8
+VAR_FAST_MEM_SIZE=20
+VAR_SLOW_MEM_SIZE=30
 VAR_TOTAL_MEM=$((${VAR_FAST_MEM_SIZE} + ${VAR_SLOW_MEM_SIZE}))
-VAR_CPU_CNT=12
+VAR_CPU_CNT=16
 
 qemu-system-x86_64 \
     --enable-kvm \
@@ -470,7 +472,7 @@ qemu-system-x86_64 \
     -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-bandwidth,bandwidth=271G \
     -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-latency,latency=237 \
     -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=46G \
-    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+    -netdev user,id=net0,hostfwd=tcp::5555-:22 \
     -device virtio-net-pci,netdev=net0 \
     -monitor none \
     -serial stdio

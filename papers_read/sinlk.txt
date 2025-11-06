@@ -1,0 +1,33 @@
+Method:
+
+- Focusses on node granularity, and promoting whole paths
+- Uses heuristics like giving preference to upper nodes for keeping in fast memory (logical)
+- Using leafs for tracking path access frequency is also a good idea which seems obvious upon reading (but isn't actually).
+- Also single point of transition from fast to slow memory along a path is logical as well, and the methods used to achieve that are straightforward but make sense.
+- Since focussing on nodes, needs own node metadata bookkeeping (mentioned as part of frontend module)
+- Apart from that, uses common techniques :
+    - background asynchronous promotions/demotions
+    - dynamic watermark adjustment
+    - migration trigerred on breach of watermark and at some interval
+    - halves access frequency periodically to give preference to recent accesses
+- Since defines own metadata, that needs to be included in the index code. (Application modification, though claimed to be pretty less)
+
+
+Evaluation:
+
+- Microbenchmark: Focusses on skewed accesses (like us) -> 90% requests to 5% keys.
+- Macrobenchmark : YCSB (with Zipfian) (can be given a thought)
+- Also mixes reads and updates (like us).
+
+- Baseline : Weighted interleave NUMA allocation (hmm)
+- Uses TPP, MEMTIS, Caption for comparisons (along with some other optimized index variants)
+
+- For microbenchmark, creates an ideal case to compare with all hot paths in fast memory initially (i think they can do this because it's a synthetic workload for microbenchmark so they can control the hot paths created and their allocation with their module)
+
+- Across cases, they show it to be having a better throughput, lower average and tail latencies, nice scalabalit with threads. Esp good on read-heavy workloads (perhaps due to keeping a lock on writes while migrating)
+
+- Interesting : Sensitivity analysis : Can be included in our setup: Dynamic workload change : Shifting entire hot region in microbenchmark at some interval
+
+- Analysis of contribution of each indiviudal factor is also a good idea.
+
+- Lastly, picks two traces with largest WSS from Alibaba Block Traces for real-world evaluation

@@ -1,0 +1,72 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.3 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{none/global//global/global/global}
+    \entry{unal2025tolerate}{inproceedings}{}{}
+      \name{author}{5}{}{%
+        {{hash=3fdac3760599cba252f0a1200205ce3c}{%
+           family={Unal},
+           familyi={U\bibinitperiod},
+           given={Musa},
+           giveni={M\bibinitperiod}}}%
+        {{hash=91e105fa60887e252869bd6fd2cdd66c}{%
+           family={Gupta},
+           familyi={G\bibinitperiod},
+           given={Vishal},
+           giveni={V\bibinitperiod}}}%
+        {{hash=5082adcdbea19582f3fc2a925384e083}{%
+           family={Pan},
+           familyi={P\bibinitperiod},
+           given={Yueyang},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=778fefd6c8664af316256bbff75edc78}{%
+           family={Ren},
+           familyi={R\bibinitperiod},
+           given={Yujie},
+           giveni={Y\bibinitperiod}}}%
+        {{hash=e369b156b400c8600846a3f1f38126a0}{%
+           family={Kashyap},
+           familyi={K\bibinitperiod},
+           given={Sanidhya},
+           giveni={S\bibinitperiod}}}%
+      }
+      \strng{namehash}{fa735d05577017a45901740ee37d7df9}
+      \strng{fullhash}{71293d67aaa31e64183389363e2a9b7b}
+      \strng{fullhashraw}{71293d67aaa31e64183389363e2a9b7b}
+      \strng{bibnamehash}{fa735d05577017a45901740ee37d7df9}
+      \strng{authorbibnamehash}{fa735d05577017a45901740ee37d7df9}
+      \strng{authornamehash}{fa735d05577017a45901740ee37d7df9}
+      \strng{authorfullhash}{71293d67aaa31e64183389363e2a9b7b}
+      \strng{authorfullhashraw}{71293d67aaa31e64183389363e2a9b7b}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{booktitle}{Proceedings of the 2025 Workshop on Hot Topics in Operating Systems}
+      \field{title}{Tolerate It if You Cannot Reduce It: Handling Latency in Tiered Memory}
+      \field{year}{2025}
+      \true{nocite}
+      \field{pages}{50\bibrangedash 57}
+      \range{pages}{8}
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+

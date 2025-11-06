@@ -1,0 +1,521 @@
+\documentclass{article}
+\usepackage[a4paper, margin=0.5in]{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{float}
+
+\pagenumbering{gobble}
+
+% Hyperref setup
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=blue,
+    pdftitle={CXL and HMSDK Setup using QEMU},
+}
+
+% Listings setup for code blocks
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\definecolor{string}{RGB}{214,94,53}
+\definecolor{key}{RGB}{70,130,180}
+\definecolor{number}{RGB}{152,118,170}
+\definecolor{boolean}{RGB}{204,102,102}
+
+\lstdefinelanguage{json}{
+    basicstyle=\ttfamily\footnotesize,
+    stringstyle=\color{string},
+    keywordstyle=\color{key},
+    morekeywords={true,false,null},
+    keywordstyle=[2]\color{boolean},
+    commentstyle=\color{codegreen},
+    morestring=[b]",
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    literate=
+        *{0}{{{\color{number}0}}}{1}
+         {1}{{{\color{number}1}}}{1}
+         {2}{{{\color{number}2}}}{1}
+         {3}{{{\color{number}3}}}{1}
+         {4}{{{\color{number}4}}}{1}
+         {5}{{{\color{number}5}}}{1}
+         {6}{{{\color{number}6}}}{1}
+         {7}{{{\color{number}7}}}{1}
+         {8}{{{\color{number}8}}}{1}
+         {9}{{{\color{number}9}}}{1}
+}
+
+\usepackage[
+backend=biber,
+style=numeric,
+sorting=none
+]{biblatex}
+\addbibresource{bibliography.bib}
+
+\begin{document}
+
+\section*{CXL and HMSDK Setup using QEMU}
+
+Started with Ubuntu Plucky : Linux 6.14.08
+
+qemu-system-x86\_64 --version : 9.2.1
+
+Had \texttt{CONFIG\_CXL} support (after downloading \texttt{linux-modules-extra} and \texttt{sudo modprobing cxl\_mem})
+
+Most helpful doc : \href{https://www.fujitsu.com/jp/documents/products/software/os/linux/catalog/Exploring_CXL_Memory_Configuration_and_Emulation.pdf}{Fujitsu\_PDF} among others.
+
+Official QEMU CXL doc : \href{https://www.qemu.org/docs/master/system/devices/cxl.html}{Qemu website}
+
+Also need to install \texttt{ndctl} (building from source should not be needed).
+
+Key takeaways from doc :
+\begin{itemize}
+    \item \texttt{cxl-fmw.0.size=16G} : this size should be more size of the CXL memory, to allow creation of CXL region
+    \item KVM inside QEMU CXL will cause issues.
+\end{itemize}
+
+Command to create volatile CXL memory region:
+\begin{lstlisting}[language=bash]
+sudo cxl create-region -m mem0 -d decoder0.0 -t ram
+\end{lstlisting}
+
+The region created will be the size of \texttt{mem0} (need to ensure size of \texttt{decoder0.0} more than size of \texttt{mem0} as stated above)
+
+Linux 6.14 with QEMU 9.2 is sufficient to "detect" a CXL device, without needing source build (since we could have all modules asked mandatory on slide 19 (except one))
+
+BUT, issue lies in creating the CXL region:
+
+CXL \texttt{create-region} command fails :
+\texttt{cxl region: create\_region: region0: failed to commit decode: No such device or address when trying inside qemu vm}
+
+\texttt{dmesg} shows issue with synchronizing cache.
+
+Looking at slide 19 : It mentions, \href{https://www.kernelconfig.io/config_cxl_region_invalidation_test}{CONFIG\_CXL\_REGION\_INVALIDATION\_TEST} is essential in \textbf{emulation environment}. (Perhaps not needed with actual CXL hardware). Reason : \href{https://patchwork.kernel.org/project/linux-nvdimm/patch/166993222098.1995348.16604163596374520890.stgit@dwillia2-xfh.jf.intel.com/}{Reference}
+
+\textit{Conclusion 1} : Current mainline kernel can support real CXL without rebuild but will most likely need a rebuild for QEMU emulation (because \texttt{CONFIG\_CXL\_REGION\_INVALIDATION\_TEST} is unlikely to be \texttt{y} by default)
+
+So we have got one reason to build the kernel : 
+
+for getting \texttt{CONFIG\_CXL\_REGION\_INVALIDATION\_TEST=y} and \texttt{CONFIG\_MEMORY\_HOTPLUG\_DEFAULT\_ONLINE=y} 
+
+(makes life easier since just creating cxl-region brings memory online).
+
+Also for hmsdk capacity expansion, a DAMON-enabled kernel is needed and if \texttt{CONFIG\_DAMON} is not \texttt{y} (mostly true for Ubuntu versions), that gives another reason to build.
+
+So went ahead with compiling the linux submodule in hmsdk repo : it's \textbf{Linux 6.12}. Qemu is still 9.2.
+
+Followed this from their wiki:
+\begin{lstlisting}[language=bash]
+$ cd hmsdk/linux
+$ cp /boot/config-$(uname -r) .config
+$ echo 'CONFIG_DAMON=y' >> .config
+$ echo 'CONFIG_DAMON_VADDR=y' >> .config
+$ echo 'CONFIG_DAMON_PADDR=y' >> .config
+$ echo 'CONFIG_DAMON_SYSFS=y' >> .config
+$ echo 'CONFIG_MEMCG=y' >> .config
+$ echo 'CONFIG_MEMORY_HOTPLUG=y' >> .config
+# also CONFIG_CXL_REGION_INVALIDATION_TEST=y and CONFIG_MEMORY_HOTPLUG_DEFAULT_ONLINE=y
+$ make menuconfig
+$ make -j$(nproc)
+# had to turn off some certificate configs
+$ sudo make INSTALL_MOD_STRIP=1 modules_install
+$ sudo make headers_install
+$ sudo make install
+\end{lstlisting}
+
+After making the GRUB menu visible (which is not in cloud-init by default), we are good to go.
+
+Initial script (almost, since I might have changed some parameter which I may not remember) which first showed some success:
+\begin{lstlisting}[language=bash]
+#!/bin/bash
+
+VAR_MAIN_MEM_SIZE=8
+VAR_CXL_MEM_SIZE=8
+VAR_CPU_CNT=12
+MAX_MEM_SIZE=$((${VAR_MAIN_MEM_SIZE} + ${VAR_CXL_MEM_SIZE} + 20))
+
+qemu-system-x86_64 \
+  --nographic \
+  -m ${VAR_MAIN_MEM_SIZE}G,maxmem=${MAX_MEM_SIZE}G,slots=8 \
+  -machine q35,accel=tcg,cxl=on \
+  -smp cpus=$VAR_CPU_CNT \
+  -drive file=$1,index=0,format=qcow2,if=none,id=disk0 \
+  -device virtio-blk-pci,drive=disk0,id=virtio-disk0 \
+  -netdev user,id=net0 \
+  -device virtio-net-pci,netdev=net0,bus=pcie.0 \
+  -object memory-backend-ram,size=${VAR_CXL_MEM_SIZE}G,id=m1,share=on \
+  -device pxb-cxl,bus_nr=12,bus=pcie.0,id=cxl.1 \
+  -device cxl-rp,port=0,bus=cxl.1,id=root_port13,chassis=0,slot=2 \
+  -device cxl-type3,bus=root_port13,volatile-memdev=m1,id=cxl-vmem0 \
+  -M cxl-fmw.0.targets.0=cxl.1,cxl-fmw.0.size=16G
+\end{lstlisting}
+
+This script allowed me to use almost all features, and could start damo through hmsdk as well.
+
+Illustrative Examples :
+\begin{itemize}
+    \item Before creating CXL region :
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-29 174125.png"}
+    \end{figure}
+    \item After creating CXL region (\texttt{sudo cxl create-region -m mem0 -d decoder0.0 -t ram}):
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{image.png}
+    \end{figure}
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{image-1.png}
+    \end{figure}
+    \item Automatically onlined as CPU-less NUMA node due to \texttt{MEMORY\_HOTPLUG\_DEFAULT\_ONLINE} :
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{image-2.png}
+    \end{figure}
+    \item Being identified as different tiers automatically (yes!) :
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-29 175124.png"}
+    \end{figure}
+\end{itemize}
+
+But one catch : Any memory access forced on CXL region led to message : \texttt{qemu-system-x86\_64: virtio: bogus descriptor or out of resources} in running VM terminal beyond which VM would become unresponsive/hung, would eventually lead to kernel messages system hung on so and so task for this much time. Would have to kill the qemu process as the only option.
+
+Which brings to : \textbf{why no kvm} :
+
+\texttt{accel=kvm, -cpu host,pmu=on} supposedly behave in very weird ways when QEMU runs them for CXL : When using the above script with these 2 lines and forcing memory access on the CXL region, \texttt{Bad swap entry} messages would fill the screen, even though benchmark should not exceed capacity of CXL at all (like running a 3G or even 1G benchmark on 8G CXL node). When directly executing the executable instead of the python script (which would usually give benchmark not found), would lead to \textbf{Illegal instruction (core dumped)} : again needing to kill the vm. Eg : Membind 0 works but membind 1 fails :
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-30 010945.png"}
+\end{figure}
+
+Sometimes would get other strange kernel errors, again having to kill the vm finally.
+
+\textit{Conclusion 2:} KVM with QEMU for CXL emulation is probably not a good idea at least with this (Linux 6.12 + Qemu 9.2) combination. (Also mentioned in the Fujitsu doc linked above). And looking at this \href{https://gitlab.com/qemu-project/qemu/-/issues/3075}{QEMU Issue}, it doesn't seem to be fixed in latest version as well, please correct me on this if you have more info.
+
+What does this imply? : Since we are using TCG, things are pretty slow. And, \textbf{no pmu as well} (I think).
+
+About the \texttt{qemu-system-x86\_64: virtio: bogus descriptor or out of resources} issue, LLM suggested me perhaps it is an I/O issue, and looked like that since \texttt{./memeater --membind 1} had worked (although slowly), so suggested me this script (saved in `experiments/qemu-scripts/cxl-vm-1.sh`) :
+
+\begin{lstlisting}[language=bash]
+#!/bin/bash
+
+cp /usr/share/OVMF/OVMF_VARS_4M.fd my_ovmf_vars.fd
+
+VAR_MAIN_MEM_SIZE=8
+VAR_CXL_MEM_SIZE=8
+VAR_CPU_CNT=12
+MAX_MEM_SIZE=$((${VAR_MAIN_MEM_SIZE} + ${VAR_CXL_MEM_SIZE} + 20))
+
+qemu-system-x86_64 \
+  --nographic \
+  -m ${VAR_MAIN_MEM_SIZE}G,maxmem=${MAX_MEM_SIZE}G,slots=8 \
+  -machine q35,accel=tcg,cxl=on \
+  -smp cpus=$VAR_CPU_CNT \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+  -drive if=pflash,format=raw,file=my_ovmf_vars.fd \
+  -drive file=$1,format=qcow2,if=none,id=disk0 \
+  -device ich9-ahci,id=ahci \
+  -device ide-hd,drive=disk0,bus=ahci.0 \
+  -netdev user,id=net0 \
+  -device e1000e,netdev=net0 \
+  -object memory-backend-ram,size=${VAR_CXL_MEM_SIZE}G,id=m1,share=on \
+  -device pxb-cxl,bus_nr=12,bus=pcie.0,id=cxl.1 \
+  -device cxl-rp,port=0,bus=cxl.1,id=root_port13,chassis=0,slot=2 \
+  -device cxl-type3,bus=root_port13,volatile-memdev=m1,id=cxl-vmem0 \
+  -M cxl-fmw.0.targets.0=cxl.1,cxl-fmw.0.size=16G
+\end{lstlisting}
+
+Not sure why the firmware lines are needed and if they are really helpful. This allowed me to run \texttt{gups 1G --membind node 1} (finally!) but it was terribly slow. Also a more ambitious benchmark (like \texttt{gups 3G with 6G hogged})
+
+Tried today this script directly inspired from the Fujitsu PDF :
+\begin{lstlisting}[language=bash]
+#!/bin/bash
+
+VAR_MAIN_MEM_SIZE=8
+VAR_CXL_MEM_SIZE=8
+VAR_CPU_CNT=12
+MAX_MEM_SIZE=$((${VAR_MAIN_MEM_SIZE} + ${VAR_CXL_MEM_SIZE} + 20))
+
+qemu-system-x86_64 \
+  -drive file=$1,format=qcow2,index=0,media=disk,id=hd \
+  -m ${VAR_MAIN_MEM_SIZE}G,maxmem=${MAX_MEM_SIZE}G,slots=8 \
+  -machine type=q35,accel=tcg,cxl=on \
+  -smp $VAR_CPU_CNT \
+  -nographic \
+  -device e1000,netdev=net0 \
+  -netdev user,id=net0 \
+  -object memory-backend-ram,size=${VAR_CXL_MEM_SIZE}G,id=m1,share=on \
+  -device pxb-cxl,bus_nr=12,bus=pcie.0,id=cxl.1 \
+  -device cxl-rp,port=0,bus=cxl.1,id=root_port13,chassis=0,slot=2 \
+  -device cxl-type3,bus=root_port13,volatile-memdev=m1,id=cxl-vmem0 \
+  -M cxl-fmw.0.targets.0=cxl.1,cxl-fmw.0.size=16G
+\end{lstlisting}
+
+Quite similar to the last once, just without the firmware lines. This one again allows to access CXL memory but terribly slow.
+
+Case in point :
+\begin{itemize}
+    \item \texttt{numactl --membind 0 ./bench/apps/gups/gupstoy 1G 0} : Completed under 4 mins
+    \item \texttt{numactl --membind 1 ./bench/apps/gups/gupstoy 1G 0} : Not completed even after 4 hours (took more than 1 hr just to occupy 1G on CXL)
+\end{itemize}
+
+Illustrative Examples :
+\begin{itemize}
+    \item Still loaded just 877M/1G in 1h :
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-30 113818.png"}
+    \end{figure}
+    \item Able to use 1G on CXL :
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-30 115802.png"}
+    \end{figure}
+    \item \textit{An interesting observation}: \texttt{numa\_hits} on node 1 increase rapidly when amount of memory loaded in it is increasing (as expected), but more or less \textbf{stagnates} once 1G allocation is complete but the benchmark is running, while node0 numa hits increase much more rapidly. Examples :
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-30 115834.png"}
+    \end{figure}
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-30 124032.png"}
+    \end{figure}
+    \begin{figure}[H]
+        \centering
+        \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-30 132255.png"}
+    \end{figure}
+\end{itemize}
+
+A more ambitious benchmark (in current settings atleast), like hogging large portion on node 0, will make system "very slow" to the point of unresponsive, the benchmark may not complete (or sometimes not even start).
+
+\textbf{Question : }\textit{Can we improve this, speed this up, make it usable?}: Will try to look into it, but no answer currently.
+
+\section*{GUPS Benchmark with CXL nodes}
+
+DDR RAM : 12 cores and 8G at node 0 \\
+CXL : no cores and 8G at node 1
+
+Designed such that max CXL used memory reaches 200M in one of them (and 0 for 1G and 5G without memory hogging):
+
+Committed at \texttt{experiments/cxl-attached-gups}:
+
+No HMSDK, only NUMA\_balancing (combined with memory hogging for one case) :
+
+NUMA config common for all
+\begin{lstlisting}[language=json]
+"numa_balancing": {
+    "numa_balancing": "2",
+    "demotion_enabled": "true",
+    "zone_reclaim_mode": "1",
+    "lru_gen_enabled": "0x0000",
+    "hot_threshold_ms": "1000",
+    "scan_delay_ms": "1000",
+    "scan_period_max_ms": "1100",
+    "scan_period_min_ms": "1000",
+    "scan_size_mb": "1024"
+}
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{GUPS Benchmark Results}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Metric} & \textbf{GUPS 1G} & \textbf{GUPS 5G} & \textbf{GUPS 1G with 6000M memhog} & \textbf{GUPS 7G} \\ \midrule
+\textbf{numa\_hit} & 285190 & 1340912 & 309789 & 1945183 \\
+\textbf{numa\_miss} & 0 & 0 & 5848 & 37208 \\
+\textbf{numa\_foreign} & 0 & 0 & 5848 & 37208 \\
+\textbf{numa\_interleave} & 0 & 0 & 0 & 0 \\
+\textbf{numa\_local} & 285190 & 1340912 & 285244 & 1887016 \\
+\textbf{numa\_other} & 0 & 0 & 30393 & 95375 \\
+\textbf{pgpromote\_success} & 29 & 0 & 5470 & 45657 \\
+\textbf{pgpromote\_candidate} & 0 & 0 & 96815 & 217138 \\
+\textbf{pgdemote\_kswapd} & 0 & 0 & 23700 & 56494 \\
+\textbf{pgdemote\_direct} & 0 & 0 & 0 & 0 \\
+\textbf{pgdemote\_khugepaged} & 0 & 0 & 0 & 0 \\
+\textbf{pgalloc\_dma} & 0 & 0 & 3443 & 3410 \\
+\textbf{pgalloc\_dma32} & 0 & 29934 & 236649 & 469456 \\
+\textbf{pgalloc\_normal} & 285636 & 1311514 & 75976 & 1510320 \\
+\textbf{pgfault} & 294634 & 1350134 & 400053 & 2450348 \\
+\textbf{pgmajfault} & 5 & 25 & 24 & 25 \\
+\textbf{kswapd\_low\_wmark\_hit\_quickly} & 0 & 0 & 0 & 0 \\
+\textbf{kswapd\_high\_wmark\_hit\_quickly} & 0 & 0 & 6 & 15 \\
+\textbf{numa\_pte\_updates} & 80 & 0 & 102902 & 522354 \\
+\textbf{numa\_huge\_pte\_updates} & 0 & 0 & 0 & 0 \\
+\textbf{numa\_hint\_faults} & 29 & 0 & 101691 & 513410 \\
+\textbf{numa\_hint\_faults\_local} & 0 & 0 & 0 & 0 \\
+\textbf{numa\_pages\_migrated} & 29 & 0 & 5470 & 45691 \\
+\textbf{pgmigrate\_success} & 29 & 0 & 29489 & 102345 \\
+\textbf{pgmigrate\_fail} & 0 & 0 & 521 & 1506 \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Some words on HMSDK (Capacity Expansion)}
+
+\href{https://github.com/skhynix/hmsdk/wiki/Capacity-Expansion}{Reference}
+
+From what I could grasp, for capacity expansion / memory tiering, HMSDK uses existing DAMON and DAMOS frameworks and adds promotion/demotion actions (integrated in kernel 6.11 onwards, hence no local patch needed). From initial read, it seems to just helping in creating the initial \texttt{.yaml} config for \texttt{damo}, (in which we have to specify promotion and demotion targets, ie we need not depend on auto detection).
+
+DAMO Usage : \href{https://github.com/damonitor/damo/blob/next/USAGE.md}{doc}
+
+Apart from that, I believe we have to interact with damo interface only and in order to tune it (if needed), its advanced options need to be studied.
+
+I have tried a very simple setup currently :
+\begin{lstlisting}[language=bash]
+$ sudo ~/hmsdk/tools/gen_migpol.py --demote 0 1 --promote 1 0 -o ~/hmsdk.yaml
+echo true | sudo tee /sys/kernel/mm/numa/demotion_enabled
+sudo mount -t cgroup2 none /sys/fs/cgroup
+echo '+memory' | sudo tee /sys/fs/cgroup/cgroup.subtree_control
+sudo mkdir -p /sys/fs/cgroup/hmsdk
+sudo ~/hmsdk/damo/damo start ~/hmsdk.yaml
+\end{lstlisting}
+
+This starts damo with provided config, config will depend on device connected (different for CXL or memory numa node).
+
+From usage guidelines of hmsdk, it is by default enabled for a cgroup.Running a benchmark:
+\begin{lstlisting}[language=bash]
+sudo sh -c "echo \$$ > /sys/fs/cgroup/hmsdk/cgroup.procs && exec ./run.py"
+\end{lstlisting}
+
+To see a snapshot of active damo's stats:
+\begin{lstlisting}[language=bash]
+$ sudo ~/hmsdk/damo/damo show
+\end{lstlisting}
+
+Stop damo with:
+\begin{lstlisting}[language=bash]
+$ sudo ~/hmsdk/damo/damo stop
+\end{lstlisting}
+
+\texttt{damo show} when running a benchmark :
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-30 211452.png"}
+\end{figure}
+
+Since we are only concerned with how HMSDK affects promotions/demotions only (I believe), hence currently limiting myself to these commands. Apart from them key commands are \texttt{damo record} and \texttt{damo report <subcommand>} but not using them since (I think) we don't need statistics from DAMON, we only require its \texttt{migrate\_cold} and \texttt{migrate\_hot} actions. Also, \texttt{damo record} needs perf.
+
+Could use \texttt{damo} commands when working with cxl node as well :
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-29 221151.png"}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{"Screenshot 2025-08-29 221158.png"}
+\end{figure}
+
+\section*{HMSDK benchmarks (with two NUMA nodes and NOT CXL)}
+
+Since we need tiering detected for our NUMA nodes, we should specify some HMAT attributes and then kernel will do rest of the job (no local patch should be needed) : \href{https://lkml.org/lkml/2024/3/27/240}{Kernel Patch}
+
+Referring this excerpt from \href{https://www.qemu.org/docs/master/system/qemu-manpage.html}{QEMU manpage}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{image-3.png}
+\end{figure}
+
+So this script turned out to be helpful, and all subsequent experiments were done with this (saved in `experiments/qemu-scripts/numa-tiering.sh`):
+
+\begin{lstlisting}[language=bash]
+#!/bin/bash
+
+VAR_FAST_MEM_SIZE=20
+VAR_SLOW_MEM_SIZE=30
+VAR_TOTAL_MEM=$((${VAR_FAST_MEM_SIZE} + ${VAR_SLOW_MEM_SIZE}))
+VAR_CPU_CNT=16
+
+qemu-system-x86_64 \
+    --enable-kvm \
+    --nographic \
+    -machine q35,hmat=on \
+    -m ${VAR_TOTAL_MEM}G \
+    -cpu host,pmu=on \
+    -smp ${VAR_CPU_CNT} \
+    -drive file=$1,index=0,format=qcow2,if=virtio \
+    -object memory-backend-ram,size=${VAR_FAST_MEM_SIZE}G,id=m0 \
+    -object memory-backend-ram,size=${VAR_SLOW_MEM_SIZE}G,id=m1 \
+    -numa node,nodeid=0,cpus=0-$((VAR_CPU_CNT-1)),memdev=m0 \
+    -numa node,nodeid=1,memdev=m1,initiator=0 \
+    -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-latency,latency=112 \
+    -numa hmat-lb,initiator=0,target=0,hierarchy=memory,data-type=access-bandwidth,bandwidth=271G \
+    -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-latency,latency=237 \
+    -numa hmat-lb,initiator=0,target=1,hierarchy=memory,data-type=access-bandwidth,bandwidth=46G \
+    -netdev user,id=net0,hostfwd=tcp::5555-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    -monitor none \
+    -serial stdio
+\end{lstlisting}
+
+Resulting in this:
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{image-4.png}
+\end{figure}
+
+Latency and bandwidth values taken from [1].
+
+Afaik, access-latency, access-bw, specify both read/write. Though they can be specified explicitly if needed also. Also since already specified lat, bw hence not specifying dist between nodes.
+
+Committed at \texttt{experiments/hmsdk\_damon\_numa}:
+
+Ran GUPS for 9G for 4 cases :
+\begin{itemize}
+    \item hmsdk/damo enabled but numa\_balancing disabled (demotion\_enabled=true though as per hmsdk usage guidelines)
+    \item numa\_balancing enabled but damo stopped
+    \item both hmsdk/damo and numa\_balancing enabled
+    \item neither hmsdk/damo nor numa\_balancing enabled
+    \item both hmsdk/damo and numa\_balancing enabled with 2G hogged on node 0
+\end{itemize}
+
+\textbf{NOTE}: Not sure how to interpret results with hmsdk enabled, the values are strange. Like, with numa-balancing enabled, there are pgpromote\_candidate but no pgpromote, this is weird.
+
+\textbf{NOTE2}: Not sure how to get number of migrate\_hot and migrate\_cold actions performed by DAMOS (looked it up but didn't find some concrete answer). Like, damo status shows cumulative values afaik. (One option can be to stop and start after each benchmark). Don't know if damo report is helpful in this regard or not.
+
+To give an idea of latency wrt CXL, GUPS 7G in previous case took more than 20mins, where CXL occupied was around 200M. Here GUPS 9G took around 2 mins, even though 2.2G of node 1 were occupied.
+
+\textbf{\textit{Bottomline}}:Perhaps, considering the behaviour of scripts, we may say CXL emulation scripts are good for understanding functional behaviour of hardware but for the purpose of benchmarking, tiered DRAM NUMA nodes look like the way to go.
+
+\hrulefill
+
+PS: You can boot the VM yourself. You can find it at my account at : /home/roopam/epfl-research-intern/qemu-vms/epfl-vm.img. The three scripts used are \texttt{cxl-vm.sh}, \texttt{new-hope.sh} and \texttt{numa-tiered.sh}. Inside the VM, please select Linux 6.12+ (it's also the default option in the grub menu).
+
+Login : ubuntu Password : roopam1234
+
+PS2 : Powering off VM writes some garbage on terminal sometimes. So better idea to sudo poweroff and start again instead of sudo reboot.
+
+\nocite{*}
+\printbibliography
+
+\end{document}
